@@ -7,21 +7,31 @@
  *  The original code adapted was open source from V4L2 API and had the
  *  following use and incorporation policy:
  * 
+ * *****************************************************************************
+​ ​*​ ​@file​ capture.c
+​ ​*​ ​@brief ​ functionality of the socket server communication : Server side C/C++ program to demonstrate Socket
+ * Two threads are used in this modules, one is to capture the frames and other is to send the frames over socket
+ * @reference https://www.geeksforgeeks.org/socket-programming-cc/
+ * @reference https://stackoverflow.com/questions/13097375/sending-images-over-sockets
+ ​​*
+ ​​*​ ​@author​ ​Vignesh Vadivel
+ ​​*​ ​@date​ ​Apr ​23​ ​2023
+ ​*​ ​@version​ ​1.0
  *  This program can be used and distributed without restrictions.
  *
  *      This program is provided with the V4L2 API
  * see http://linuxtv.org/docs.php for more information
  */
 
+/************************************include files***************************/
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <assert.h>
 #include <pthread.h>
-#include <getopt.h>             /* getopt_long() */
-
-#include <fcntl.h>              /* low-level i/o */
+#include <getopt.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -32,11 +42,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <syslog.h>
-
 #include <linux/videodev2.h>
-
 #include <time.h>
 
+/************************************Macros***************************/
 #define CLEAR(x) memset(&(x), 0, sizeof(x))
 #define COLOR_CONVERT
 #define HRES 320
@@ -48,6 +57,7 @@
 // Format is used by a number of functions, so made as a file global
 static struct v4l2_format fmt;
 
+/************************************Enumeration***************************/
 enum io_method 
 {
         IO_METHOD_READ,
@@ -55,15 +65,15 @@ enum io_method
         IO_METHOD_USERPTR,
 };
 
+/************************************Struct***************************/
 struct buffer 
 {
         void   *start;
         size_t  length;
 };
 
+/*******************************Global Variables**********************/
 static char            *dev_name;
-//static enum io_method   io = IO_METHOD_USERPTR;
-//static enum io_method   io = IO_METHOD_READ;
 static enum io_method   io = IO_METHOD_MMAP;
 static int              fd = -1;
 struct buffer          *buffers;
@@ -71,9 +81,10 @@ static unsigned int     n_buffers;
 static int              out_buf;
 static int              force_format=1;
 static int              frame_count = 1;
-pthread_mutex_t mutexLocks[1];// = {lock1, lock2, lock3, lock4, lock5};
-bool imageFlags[1] = {false};//, false, false, false, false};
+pthread_mutex_t mutexLocks[1];
+bool imageFlags[1] = {false};
 
+/*******************************Function declarations**********************/
 static void errno_exit(const char *s)
 {
         syslog(LOG_ERR, "%s error %d, %s\n", s, errno, strerror(errno));
@@ -93,19 +104,22 @@ static int xioctl(int fh, int request, void *arg)
         return r;
 }
 
+// File names to store the images //
 char ppm_header[]="P6\n#9999999999 sec 9999999999 msec \n"HRES_STR" "VRES_STR"\n255\n";
 char ppm_dumpname[][10]={"test1.ppm","test2.ppm","test3.ppm","test4.ppm","test5.ppm"};
 
 static void dump_ppm(const void *p, int size, unsigned int tag, struct timespec *time)
 {
 
+    // Lock before writing //
     pthread_mutex_lock(&mutexLocks[tag-1]);
     if (imageFlags[tag-1]){
     	pthread_mutex_unlock(&mutexLocks[tag-1]);
     	return;
     }
     int written, total, dumpfd;
-   
+    
+    // Open file descriptor //
     dumpfd = open(ppm_dumpname[tag-1], O_WRONLY | O_NONBLOCK | O_CREAT, 00666);
 
     snprintf(&ppm_header[4], 11, "%010d", (int)time->tv_sec);
@@ -122,65 +136,12 @@ static void dump_ppm(const void *p, int size, unsigned int tag, struct timespec 
         total+=written;
     } while(total < size);
 
-    //printf("wrote %d bytes\n", total);
-
     close(dumpfd);
     imageFlags[tag-1] = true;
+    // Unlock after writing //
     pthread_mutex_unlock(&mutexLocks[tag-1]);
     
 }
-
-
-char pgm_header[]="P5\n#9999999999 sec 9999999999 msec \n"HRES_STR" "VRES_STR"\n255\n";
-char pgm_dumpname[]="test00000000.pgm";
-
-static void dump_pgm(const void *p, int size, unsigned int tag, struct timespec *time)
-{
-    int written, total, dumpfd;
-    
-    printf(&pgm_dumpname[4], 9, "%08d", tag);
-    strncat(&pgm_dumpname[12], ".pgm", 5);
-    dumpfd = open(pgm_dumpname, O_WRONLY | O_NONBLOCK | O_CREAT, 00666);
-
-    printf(&pgm_header[4], 11, "%010d", (int)time->tv_sec);
-    strncat(&pgm_header[14], " sec ", 5);
-    printf(&pgm_header[19], 11, "%010d", (int)((time->tv_nsec)/1000000));
-    strncat(&pgm_header[29], " msec \n"HRES_STR" "VRES_STR"\n255\n", 19);
-    written=write(dumpfd, pgm_header, sizeof(pgm_header));
-
-    total=0;
-
-    do
-    {
-        written=write(dumpfd, p, size);
-        total+=written;
-    } while(total < size);
-
-    printf("wrote %d bytes\n", total);
-
-    close(dumpfd);
-    
-}
-
-
-void yuv2rgb_float(float y, float u, float v, 
-                   unsigned char *r, unsigned char *g, unsigned char *b)
-{
-    float r_temp, g_temp, b_temp;
-
-    // R = 1.164(Y-16) + 1.1596(V-128)
-    r_temp = 1.164*(y-16.0) + 1.1596*(v-128.0);  
-    *r = r_temp > 255.0 ? 255 : (r_temp < 0.0 ? 0 : (unsigned char)r_temp);
-
-    // G = 1.164(Y-16) - 0.813*(V-128) - 0.391*(U-128)
-    g_temp = 1.164*(y-16.0) - 0.813*(v-128.0) - 0.391*(u-128.0);
-    *g = g_temp > 255.0 ? 255 : (g_temp < 0.0 ? 0 : (unsigned char)g_temp);
-
-    // B = 1.164*(Y-16) + 2.018*(U-128)
-    b_temp = 1.164*(y-16.0) + 2.018*(u-128.0);
-    *b = b_temp > 255.0 ? 255 : (b_temp < 0.0 ? 0 : (unsigned char)b_temp);
-}
-
 
 // This is probably the most acceptable conversion from camera YUYV to RGB
 //
@@ -223,8 +184,6 @@ void yuv2rgb(int y, int u, int v, unsigned char *r, unsigned char *g, unsigned c
    *b = b1 ;
 }
 
-
-
 unsigned int framecnt=0;
 unsigned char bigbuffer[(1280*960)];
 
@@ -239,66 +198,21 @@ static void process_image(const void *p, int size)
     clock_gettime(CLOCK_REALTIME, &frame_time);    
 
     framecnt++;
-    if (framecnt >= 2){
-    	framecnt = 1;
+    if (framecnt >= (frame_count+1)){
+    	framecnt = frame_count;
     }
-    ////printf("frame %d: ", framecnt);
-
-    // This just dumps the frame to a file now, but you could replace with whatever image
-    // processing you wish.
+    ////printf("Dump YUYV converted to RGB size %d\n", size);
+       
+    // Pixels are YU and YV alternating, so YUYV which is 4 bytes
+    // We want RGB, so RGBRGB which is 6 bytes
     //
-
-    if(fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_GREY)
+    for(i=0, newi=0; i<size; i=i+4, newi=newi+6)
     {
-        //printf("Dump graymap as-is size %d\n", size);
-        dump_pgm(p, size, framecnt, &frame_time);
+        y_temp=(int)pptr[i]; u_temp=(int)pptr[i+1]; y2_temp=(int)pptr[i+2]; v_temp=(int)pptr[i+3];
+        yuv2rgb(y_temp, u_temp, v_temp, &bigbuffer[newi], &bigbuffer[newi+1], &bigbuffer[newi+2]);
+        yuv2rgb(y2_temp, u_temp, v_temp, &bigbuffer[newi+3], &bigbuffer[newi+4], &bigbuffer[newi+5]);
     }
-
-    else if(fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV)
-    {
-
-#if defined(COLOR_CONVERT)
-        ////printf("Dump YUYV converted to RGB size %d\n", size);
-       
-        // Pixels are YU and YV alternating, so YUYV which is 4 bytes
-        // We want RGB, so RGBRGB which is 6 bytes
-        //
-        for(i=0, newi=0; i<size; i=i+4, newi=newi+6)
-        {
-            y_temp=(int)pptr[i]; u_temp=(int)pptr[i+1]; y2_temp=(int)pptr[i+2]; v_temp=(int)pptr[i+3];
-            yuv2rgb(y_temp, u_temp, v_temp, &bigbuffer[newi], &bigbuffer[newi+1], &bigbuffer[newi+2]);
-            yuv2rgb(y2_temp, u_temp, v_temp, &bigbuffer[newi+3], &bigbuffer[newi+4], &bigbuffer[newi+5]);
-        }
-	////printf("Before Dump call \n\r");
-        dump_ppm(bigbuffer, ((size*6)/4), framecnt, &frame_time);
-        ////printf("After Dump call \n\r");
-#else
-        //printf("Dump YUYV converted to YY size %d\n", size);
-       
-        // Pixels are YU and YV alternating, so YUYV which is 4 bytes
-        // We want Y, so YY which is 2 bytes
-        //
-        for(i=0, newi=0; i<size; i=i+4, newi=newi+2)
-        {
-            // Y1=first byte and Y2=third byte
-            bigbuffer[newi]=pptr[i];
-            bigbuffer[newi+1]=pptr[i+2];
-        }
-
-        dump_pgm(bigbuffer, (size/2), framecnt, &frame_time);
-#endif
-
-    }
-
-    else if(fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_RGB24)
-    {
-        //printf("Dump RGB as-is size %d\n", size);
-        dump_ppm(p, size, framecnt, &frame_time);
-    }
-    else
-    {
-        //printf("ERROR - unknown dump format\n");
-    }
+    dump_ppm(bigbuffer, ((size*6)/4), framecnt, &frame_time);
 
     fflush(stderr);
     ////printf(stderr, ".");
@@ -338,7 +252,6 @@ static int read_frame(void)
 
         case IO_METHOD_MMAP:
             CLEAR(buf);
-	    ////printf("Read Frame MMAP \n\r");
             buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             buf.memory = V4L2_MEMORY_MMAP;
 
@@ -350,8 +263,8 @@ static int read_frame(void)
                         return 0;
 
                     case EIO:
-                        /* Could ignore EIO, but drivers should only set for serious errors, although some set for
-                           non-fatal errors too.
+                         /* Could ignore EIO, but drivers should only set for serious errors, although some set for
+                            non-fatal errors too.
                          */
                         return 0;
 
@@ -407,7 +320,6 @@ static int read_frame(void)
             break;
     }
 
-    ////printf("R");
     return 1;
 }
 
@@ -449,10 +361,8 @@ static void mainloop(void)
 
             if (0 == r)
             {
-                //printf(stderr, "select timeout\n");
                 exit(EXIT_FAILURE);
             }
-	    //printf("Count Value %d \n\r", count);
             if (read_frame())
             {
                 if(nanosleep(&read_delay, &time_error) != 0)
@@ -863,7 +773,7 @@ static void open_device(void)
                 exit(EXIT_FAILURE);
         }
 
-        fd = open(dev_name, O_RDWR /* required */ | O_NONBLOCK, 0);
+        fd = open(dev_name, O_RDWR | O_NONBLOCK, 0);
 
         if (-1 == fd) {
                 syslog(LOG_ERR, "Cannot open '%s': %d, %s\n",
@@ -906,13 +816,11 @@ long_options[] = {
 };
 
 /*****************************Function definition******************************/
-    //snprintf(&ppm_dumpname[4], 9, "%08d", tag);
-
 void send_image(void* socket)
 {
-	int i=0;
-	while(true){
-	pthread_mutex_lock(&mutexLocks[i]);
+  int i=0;
+  while(true){
+    pthread_mutex_lock(&mutexLocks[i]);
 	if (!imageFlags[i]){
 		pthread_mutex_unlock(&mutexLocks[i]);
 		++i;
@@ -933,26 +841,27 @@ void send_image(void* socket)
 
 	if (picture == NULL)
 	{
-		//printf("Error Opening Image File");
+		syslog(LOG_ERR, "Error Opening Image File \n\r");
 	}
 
 	int returnStatus = fseek(picture, 0, SEEK_END);
 	if (returnStatus == -1)
 	{
-		//printf("fseek end failed");
+		syslog(LOG_ERR, "fseek end failed \n\r");
 		exit(EXIT_FAILURE);
 	}
+
 	// Get the size of the image
 	size = ftell(picture);
 	if (size == -1)
 	{
-		//printf("ftell failed");
+		syslog(LOG_ERR, "ftell failed \n\r");
 		exit(EXIT_FAILURE);
 	}
 	returnStatus = fseek(picture, 0, SEEK_SET);
 	if (returnStatus == -1)
 	{
-		//printf("fseek set failed");
+		syslog(LOG_ERR, "fseek set failed \n\r");
 		exit(EXIT_FAILURE);
 	}
 	//printf("Total Picture size: %i\n", size);
@@ -962,12 +871,11 @@ void send_image(void* socket)
 	returnStatus = write(*((int*)socket), (void *)&size, sizeof(int));
 	if (returnStatus == -1)
 	{
-		//printf("Write failed");
+		syslog(LOG_ERR, "Write failed \n\r");
 		exit(EXIT_FAILURE);
 	}
-	// Send Picture as Byte Array
-	//printf("Sending Picture as Byte Array\n");
 
+	// Send Picture as Byte Array
 	do
 	{ // Read while we get errors that are due to signals.
 		stat = read(*((int*)socket), &read_buffer, 255);
@@ -1017,7 +925,7 @@ void send_image(void* socket)
 	char ack;
 	int ackRead = read(*(int*)socket, &ack, 1);
 	if (ackRead == -1){
-		syslog(LOG_ERR, "Read failed \n\r");
+		syslog(LOG_ERR, "Ack Read failed \n\r");
 	}
 	//printf("ACKNOWLEDGEMENT - %c \n\r", ack);
 	imageFlags[i] = false;
@@ -1026,13 +934,9 @@ void send_image(void* socket)
 	if (i>=frame_count){
 		i=0;
 	}
-	}
+  }
 }
 void *socketThread(void* arg){
-    
-    //printf("Hello message sent\n");
-	
-    //printf("Init Image send\n");
     send_image(arg);
     //printf("Image sending Completed\n");
     return NULL;
@@ -1065,7 +969,7 @@ int main(int argc, char **argv)
 
         switch (c)
         {
-            case 0: /* getopt_long() flag */
+            case 0:
                 break;
 
             case 'd':
@@ -1112,6 +1016,8 @@ int main(int argc, char **argv)
     open_device();
     init_device();
     start_capturing();
+
+    // Start Capture Thread 
     pthread_create(&capThread, NULL, captureThread, NULL);
     
     int server_fd, new_socket = 0x00;
@@ -1122,54 +1028,55 @@ int main(int argc, char **argv)
     // Creating socket file descriptor
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
-        perror("socket failed");
-	exit(EXIT_FAILURE);
+        syslog(LOG_ERR, "socket failed \n\r");
+    	exit(EXIT_FAILURE);
     }
 
-    // Forcefully attaching socket to the port 8080
     if (setsockopt(server_fd, SOL_SOCKET,
 			   SO_REUSEADDR | SO_REUSEPORT, &opt,
 			   sizeof(opt)))
     {
-        perror("setsockopt");
+        syslog(LOG_ERR, "setsockopt failed \n\r");
         exit(EXIT_FAILURE);
     }
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
+
     // Forcefully attaching socket to the port 8080
     if (bind(server_fd, (struct sockaddr *)&address,
 			 sizeof(address)) < 0)
     {
-	perror("bind failed");
-	exit(EXIT_FAILURE);
+    	syslog(LOG_ERR,"bind failed \n\r");
+	    exit(EXIT_FAILURE);
     }
-    if (listen(server_fd, 3) < 0)    //snprintf(&ppm_dumpname[4], 9, "%08d", tag);
+    if (listen(server_fd, 3) < 0)
     {
-        perror("listen");
+        syslog(LOG_ERR,"listen failed \n\r");
         exit(EXIT_FAILURE);
     }
     if ((new_socket = accept(server_fd, (struct sockaddr *)&address,
 						 (socklen_t *)&addrlen)) < 0)
     {
-        perror("accept");
-	exit(EXIT_FAILURE);
+        syslog(LOG_ERR,"accept failed \n\r");
+	    exit(EXIT_FAILURE);
     }
 
     pthread_create(&sockThread, NULL, socketThread, &new_socket);
 
     pthread_join(capThread, NULL);
     pthread_join(sockThread, NULL);
+
     // closing the connected socketcapThread
     int returnStatus = close(new_socket);
     if (returnStatus == -1)
     {
-	perror("Close File descriptor");
-	exit(EXIT_FAILURE);
+	    syslog(LOG_ERR,"Close File descriptor \n\r");
+	    exit(EXIT_FAILURE);
     }
     stop_capturing();
     uninit_device();
     close_device();
-    //printf(stderr, "\n");
+
     return 0;
 }
